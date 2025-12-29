@@ -1,16 +1,3 @@
-Development Suspended
-=====================
-
-The FLARE Team must suspend development and maintenance of FakeNet-NG for the
-time being.
-
-FLARE has opted to indicate the project status here instead of archiving the
-project. This will allow users and maintainers to continue to log issues
-documenting valuable information about problems, troubleshooting, and
-work-arounds.
-
-Original Documentation Follows
-==============================
      ______      _  ________ _   _ ______ _______     _   _  _____
     |  ____/\   | |/ /  ____| \ | |  ____|__   __|   | \ | |/ ____|
     | |__ /  \  | ' /| |__  |  \| | |__     | |______|  \| | |  __
@@ -20,7 +7,7 @@ Original Documentation Follows
 
            D   O   C   U   M   E   N   T   A   T   I   O   N
 
-FakeNet-NG is a next generation dynamic network analysis tool for malware
+FakeNet-NG 3.5 is a next generation dynamic network analysis tool for malware
 analysts and penetration testers. It is open source and designed for the latest
 versions of Windows (and Linux, for certain modes of operation). FakeNet-NG is
 based on the excellent Fakenet tool developed by Andrew Honig and Michael
@@ -36,7 +23,10 @@ application's specific functionality and prototyping PoCs.
 Installation
 ============
 
-You can install FakeNet-NG in a few different ways.
+You can install FakeNet-NG in a few different ways. Note that the following
+installation processes will retrieve third-party open-source libraries used
+by FakeNet-NG to your system. These libraries will be dynamically loaded at
+runtime, and some of these libraries may be LGPL licensed.
 
 Stand-alone executable
 ----------------------
@@ -44,7 +34,7 @@ Stand-alone executable
 It is easiest to simply download the compiled version which can be obtained from
 the releases page:
 
-    https://github.com/fireeye/flare-fakenet-ng/releases
+    https://github.com/mandiant/flare-fakenet-ng/releases
 
 Execute FakeNet-NG by running 'fakenet.exe'.
 
@@ -52,33 +42,65 @@ This is the preferred method for using FakeNet-NG on Windows as it does not
 require you to install any additional modules, which is ideal for a malware
 analysis machine.
 
+*NOTE*: FakeNet-NG may be flagged as malicious by Antivirus (AV) and Endpoint Detection
+and Response (EDR) solutions (e.g., Windows Defender, Chrome's Safe Browsing).
+This is likely due to its ability to modify network traffic and simulate network
+services, in addition to the use of PyInstaller to build the release executables.
+The official release binaries are safe, and these detections should be considered false
+positives. As a reminder, FakeNet-NG is designed and highly recommended for use in
+a controlled and isolated environment, such as a Virtual Machine (VM), where it
+can safely alter the system’s network settings.
+
 Installing module
 -----------------
+1) Install Python 3.10.11 and latest pip for Windows/Linux OS.
 
-Installation on Windows requires the following dependency:
- * [Microsoft Visual C++ Compiler for Python 2.7](https://aka.ms/vcpython27)
+2) On Windows, download and install [Visual C++ build tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+    
+    Installation on Linux requires the following dependencies:
+    * Python pip package manager (e.g. python-pip for Ubuntu).
+    * Python development files (e.g. python-dev for Ubuntu).
+    * OpenSSL development files (e.g. libssl-dev for Ubuntu).
+    * libffi development files (e.g. libffi-dev for Ubuntu).
+    * libnetfilterqueue development files (e.g. libnetfilter-queue-dev for
+    Ubuntu).
 
-Installation on Linux requires the following dependencies:
- * Python pip package manager (e.g. python-pip for Ubuntu).
- * Python development files (e.g. python-dev for Ubuntu).
- * OpenSSL development files (e.g. libssl-dev for Ubuntu).
- * libffi development files (e.g. libffi-dev for Ubuntu).
- * libnetfilterqueue development files (e.g. libnetfilter-queue-dev for
-   Ubuntu).
+    Install these dependencies using the following command:
 
-Install FakeNet-NG as a Python module using pip:
+        sudo apt-get install build-essential python3.10-dev libnetfilter-queue-dev
 
-    pip install https://github.com/fireeye/flare-fakenet-ng/zipball/master
+3) Install FakeNet-NG as a Python module using pip:
 
-Or by obtaining the latest source code and installing it manually:
+        python -m pip install https://github.com/mandiant/flare-fakenet-ng/zipball/master
 
-    git clone https://github.com/fireeye/flare-fakenet-ng/
+    Or by obtaining the latest source code and installing it manually:
 
-Change directory to the downloaded flare-fakenet-ng and run:
+        git clone https://github.com/mandiant/flare-fakenet-ng/
 
-    python setup.py install
+4) Install Python dependencies by running the following commands with admin privileges:
+    
+    In Linux (tested in Ubuntu 24.04.2 LTS), run the following commands before running setup.py:
 
-Execute FakeNet-NG by running 'fakenet' in any directory.
+        python -m pip install --upgrade setuptools
+        
+        # build wheel for python 3.10
+        python -m pip install --force-reinstall netifaces
+        
+        # Observed "ModuleNotFoundError: No module named '_cffi_backend'" error while testing
+        # This will get the required version of cffi packages for cryptography
+        python -m pip install --upgrade cryptography
+
+    If installing manually, change directory to the downloaded flare-fakenet-ng and run
+    the following with admin privileges:
+
+        python setup.py install
+
+5) In Linux, free port 53 for DNS listener:
+
+        sudo systemctl stop systemd-resolved
+
+    Execute FakeNet-NG by running 'fakenet' from any directory in a privileged shell.
+
 
 No installation
 ---------------
@@ -87,29 +109,45 @@ Finally if you would like to avoid installing FakeNet-NG and just want to run it
 as-is (e.g. for development), then you would need to obtain the source code and
 install dependencies as follows:
 
-1) Install 64-bit or 32-bit Python 2.7.x for the 64-bit or 32-bit versions
-   of Windows respectively.
+1) Install 64-bit or 32-bit [Python](https://www.python.org/downloads/windows/) 3.10.11 for the 64-bit or 32-bit versions
+   of Windows/Linux respectively.
 
-2) Install Python dependencies:
+2) In Windows, install Python dependencies by running the following commands with admin privileges:
 
-    pip install pydivert dnslib dpkt pyopenssl pyftpdlib netifaces
+        python -m pip install pydivert dnslib dpkt pyopenssl pyftpdlib netifaces jinja2
 
-   *NOTE*: pydivert will also download and install WinDivert library and
-   driver in the `%PYTHONHOME%\DLLs` directory. FakeNet-NG bundles those
-   files so they are not necessary for normal use.
+    *NOTE*: pydivert will also download and install WinDivert library and
+    driver in the `%PYTHONHOME%\DLLs` directory. FakeNet-NG bundles those
+    files so they are not necessary for normal use.
 
-2b) Optionally, you can install the following module used for testing:
+   In Linux, install Python dependencies by running the following commands with admin privileges:
+   
+        python -m pip install --upgrade setuptools
+        
+        # build wheel for python 3.10
+        python -m pip install --force-reinstall netifaces
+        
+        # Observed "ModuleNotFoundError: No module named '_cffi_backend'" error while testing
+        # This will get the required version of cffi packages for cryptography
+        python -m pip install --upgrade cryptography
 
-    pip install requests
+        python -m pip install netfilterqueue dnslib dpkt pyopenssl pyftpdlib netifaces jinja2
 
-3) Download the FakeNet-NG source code:
+   Optionally, you can install the following module used for testing:
 
-    git clone https://github.com/fireeye/flare-fakenet-ng
+        python -m pip install requests
 
-Execute FakeNet-NG by running it with a Python interpreter in a privileged
-shell:
+4) Download the FakeNet-NG source code:
 
-    python fakenet.py
+        git clone https://github.com/mandiant/flare-fakenet-ng
+
+5) In Linux, free port 53 for DNS listener:
+
+        sudo systemctl stop systemd-resolved
+    Execute FakeNet-NG by running it with a Python interpreter in a privileged
+    shell:
+
+        python -m fakenet.fakenet
 
 Usage
 =====
@@ -126,11 +164,12 @@ parameter to get simple help:
      | | / ____ \| . \| |____| |\  | |____   | |      | |\  | |__| |
      |_|/_/    \_\_|\_\______|_| \_|______|  |_|      |_| \_|\_____|
 
-                             Version  1.0
+                             Version  3.5
       _____________________________________________________________
                        Developed by FLARE Team
+        Copyright (C) 2016-2024 Mandiant, Inc. All rights reserved.
       _____________________________________________________________
-    Usage: fakenet.py [options]:
+    Usage: python -m fakenet.fakenet [options]:
 
     Options:
       -h, --help            show this help message and exit
@@ -180,9 +219,10 @@ and an HTTP connection:
      | | / ____ \| . \| |____| |\  | |____   | |      | |\  | |__| |
      |_|/_/    \_\_|\_\______|_| \_|______|  |_|      |_| \_|\_____|
 
-                             Version  1.0
+                             Version  3.5
       _____________________________________________________________
                        Developed by FLARE Team
+        Copyright (C) 2016-2024 Mandiant, Inc. All rights reserved.
       _____________________________________________________________
 
     07/06/16 10:20:52 PM [           FakeNet] Loaded configuration file: configs/default.ini
@@ -254,13 +294,49 @@ logs will be labeled with the name set in the configuration file:
 
     07/06/16 10:21:03 PM [        DNS Server] Received A request for domain 'evil.com'.
 
-To stop FakeNet-NG and close out the generated PCAP file simply press `CTRL-C`:
+To stop FakeNet-NG and save the generated PCAP file and HTML report to disk simply press `CTRL-C`:
 
     07/06/16 10:21:41 PM [           FakeNet] Stopping...
     07/06/16 10:21:42 PM [    HTTPListener80] Stopping...
     07/06/16 10:21:42 PM [   HTTPListener443] Stopping...
     07/06/16 10:21:42 PM [      SMTPListener] Stopping...
     07/06/16 10:21:43 PM [          Diverter] Stopping...
+	07/06/16 10:21:43 PM [          Diverter] Generated new HTML report: report_20160607_102143.html
+
+User Interface
+--------------
+
+With each session of FakeNet-NG, an HTML report containing the Network-Based Indicators (NBIs) captured throughout the session is generated. Upon termination of FakeNet by pressing `CTRL-C`, this HTML file will be saved to the root directory of FakeNet. A user can review the NBIs by viewing this HTML file in a browser such as Chrome or Firefox.
+
+The HTML report serves as an interactive Graphical User Interface (GUI) that presents the NBI summary in a user-friendly manner. It includes various features to select, filter, and copy NBIs, making network analysis easier. The UI organizes all NBIs based on their process information and then further categorizes them by the application layer or transport layer protocol they use.
+
+#### NBI Summary Table
+The information in the NBI summary table is presented in a tabular format and includes the following details:
+
+ * Select: Clicking on the checkbox selects the corresponding NBI. You can select multiple NBIs across different or the same protocols. The entire row can also be selected by clicking anywhere within the row. Selected NBIs can be copied using the "Copy Selected NBIs" button.
+
+ * NBI: This cell represents the actual captured NBI. It includes commands, parameters, URIs, and other significant activity generated by the client against the listener. This cell summarizes malware behavior for better understanding.
+
+ * Additional Information: This cell provides extra information about each NBI request such as the transport layer protocol used, destination IP, port, and SSL encryption.
+
+ * Actions: This cell allows you to perform actions on individual NBIs. Currently, only copying is supported. Clicking the copy button copies the specific NBI cell data in a markdown format suitable for creating reports.
+
+#### Interactive Features
+The UI also includes various interactive features:
+
+ * Checkbox Selection: Checkboxes are available before each process and protocol block. Ticking a checkbox selects all NBIs under that process or protocol. This is useful when you want to select all NBIs from a particular process or protocol. You can then use the `Copy Selected NBIs` button to copy the selected data.
+
+ * Search Bar: The search bar lets you type keywords, and only the rows containing these keywords in the process name, NBI, or additional information will be displayed in the HTML page. You can then use the "Copy Filtered Data" button to copy the displayed data in markdown format. Clearing the search query restores the original table view.
+
+ * Copy Buttons:
+
+	 * `Copy Selected Data`: Copies all the selected NBIs in markdown format. You can select individual NBIs or all NBIs under a process by ticking checkboxes.
+	 * `Copy Filtered Data`: Copies the filtered NBIs' data in markdown format. If no search query is used, this button copies the entire data.
+	 * `Copy All NBIs`: Copies all the NBIs in markdown format present in the HTML page. Even if a filter is applied, clicking this button copies all NBIs.
+
+ * Disclaimer Button: Displays the disclaimer, which outlines important facts for the user to consider before making assumptions about the displayed NBI summary.
+
+ * Go To Top Button: Appears when the page's content exceeds the viewable area. Clicking this button takes you to the top of the page, where you can access important buttons like `Copy Selected NBIs`,` Copy All NBIs`, `Copy Filtered NBIs`, and the search bar.
 
 Configuration
 -------------
@@ -355,7 +431,7 @@ observed by FakeNet-NG (redirected or forwarded) to a PCAP file. It is possible
 to decrypt SSL traffic between an intercepted application and one of the
 listeners with SSL support. Use the instructions at the following page:
 
-    https://wiki.wireshark.org/SSL
+    https://wiki.wireshark.org/TLS
 
 The keys `privkey.pem` and `server.pem` used by FakeNet-NG's servers are in the
 application's root directory.
@@ -445,7 +521,8 @@ still want to let some traffic through to ensure normal operation of the
 machine. Consider a scenario where you are trying to analyze an application
  that still needs to connect to an external DNS server. You can utilize the
 `BlackListPortsTCP` and `BlackListPortsUDP` settings to define a list of
-ports to which traffic will be ignored and forwarded unaltered:
+ports to which traffic will be ignored and forwarded unaltered or
+`BlackListIDsICMP` (Windows only) to define a list of ICMP IDs to be filtered and ignored:
 
     BlackListPortsUDP: 53
 
@@ -706,6 +783,15 @@ plugins and extend existing functionality. For details, see
 Known Issues
 ============
 
+[WinError 87] The parameter is incorrect
+----------------------------------------
+As of this wriring, the default buffer size in pydivert is 1500. If FakeNet-NG
+encounters a packet larger than the default buffer size, you may observe this error.
+A workaround is to specify the desired buffer size in self.handle.recv(bufsize=<your_bufsize>)
+in fakenet/diverters/windows.
+See [here](https://github.com/ffalcinelli/pydivert/issues/42#issuecomment-495036124)
+
+
 Does not work on VMWare with host-only mode enabled
 ---------------------------------------------------
 
@@ -847,5 +933,6 @@ Contact
 =======
 
 For bugs, crashes, or other comments please contact
-FakeNet@fireeye.com.
+FakeNet@mandiant.com.
 
+Subscribe to the FLARE mailing list for community announcements! Email "subscribe" to [flare-external@google.com](mailto:flare-external@google.com?subject=subscribe).

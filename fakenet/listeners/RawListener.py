@@ -1,13 +1,16 @@
+# Copyright 2025 Google LLC
+
 import logging
-from ConfigParser import ConfigParser
+from configparser import ConfigParser
 
 import os
 import sys
-import imp
+import importlib.util
+import importlib.machinery
 import base64
 
 import threading
-import SocketServer
+import socketserver
 
 import ssl
 import socket
@@ -26,6 +29,16 @@ def qualify_file_path(filename, fallbackdir):
             raise RuntimeError('Cannot find %s' % (filename))
 
     return path
+
+def load_source(modname, filename):
+    loader = importlib.machinery.SourceFileLoader(modname, filename)
+    spec = importlib.util.spec_from_file_location(modname, filename, loader=loader)
+    module = importlib.util.module_from_spec(spec)
+    # The module is always executed and not cached in sys.modules.
+    # Uncomment the following line to cache the module.
+    # sys.modules[module.__name__] = module
+    loader.exec_module(module)
+    return module
 
 
 class RawCustomResponse(object):
@@ -55,7 +68,7 @@ class RawCustomResponse(object):
         self.static = conf.get(spec_str)
 
         if self.static is not None:
-            self.static = self.static.rstrip('\r\n')
+            self.static = self.static.rstrip('\r\n').encode("utf-8")
 
         if not self.static is not None:
             b64_text = conf.get(spec_b64)
@@ -70,7 +83,7 @@ class RawCustomResponse(object):
 
         pymodpath = qualify_file_path(conf.get(spec_dyn), configroot)
         if pymodpath:
-            pymod = imp.load_source('cr_raw_' + self.name, pymodpath)
+            pymod = load_source('cr_raw_' + self.name, pymodpath)
             funcname = 'Handle%s' % (proto.capitalize())
             if not hasattr(pymod, funcname):
                 raise ValueError('Loaded %s module %s has no function %s' %
@@ -107,7 +120,7 @@ class RawListener(object):
         self.logger.debug('Starting...')
 
         self.logger.debug('Initialized with config:')
-        for key, value in config.iteritems():
+        for key, value in config.items():
             self.logger.debug('  %10s: %s', key, value)
 
     def start(self):
@@ -193,26 +206,43 @@ class RawListener(object):
             self.server.shutdown()
             self.server.server_close()
 
-class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
+    def acceptDiverterListenerCallbacks(self, diverterListenerCallbacks):
+        self.server.diverterListenerCallbacks = diverterListenerCallbacks
 
-    def handle(self):                
-        # Hook to ensure that all `recv` calls transparently emit a hex dump
-        # in the log output, even if they occur within a user-implemented
-        # custom handler
-        def do_hexdump(data):
-            for line in hexdump_table(data):
-                self.server.logger.info(INDENT + line)
+class SocketWithHexdumpRecv():
+    def __init__(self, s, logger):
+        self.s = s
+        self.logger = logger
 
-        orig_recv = self.request.recv
+    def __getattr__(self, item):
+        if 'recv' == item:
+            return self.recv
+        else:
+            return getattr(self.s, item)
 
-        def hook_recv(self, bufsize, flags=0):
-            data = orig_recv(bufsize, flags)
-            if data:
-                do_hexdump(data)
-            return data
+    def do_hexdump(self, data):
+        hexdump_lines = hexdump_table(data)
 
-        bound_meth = hook_recv.__get__(self.request, self.request.__class__)
-        setattr(self.request, 'recv', bound_meth)
+        for line in hexdump_lines:
+            self.logger.info(INDENT + line)
+
+    # Hook to ensure that all `recv` calls transparently emit a hex dump
+    # in the log output, even if they occur within a user-implemented
+    # custom handler
+    def recv(self, n, flags=0):
+        data = self.s.recv(n, flags)
+        if data:
+            self.do_hexdump(data)
+        return data
+
+class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
+
+    def handle(self):
+        # Using a custom class, SocketWithHexdumpRecv, so as to hook the recv function
+        # setattr(self.request, 'recv', hook_recv) stopped working in python 3
+        # as recv attribute became read-only
+
+        self.request = SocketWithHexdumpRecv(self.request, self.server.logger)
 
         # Timeout connection to prevent hanging
         self.request.settimeout(int(self.server.config.get('timeout', 5)))
@@ -231,6 +261,13 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
                     if not data:
                         break
 
+                    # Collect NBIs
+                    hexdump_lines = hexdump_table(data)
+                    collect_nbi(self.client_address[1], hexdump_lines,
+                                self.server.config.get('protocol'),
+                                self.server.config.get('usessl'),
+                                self.server.diverterListenerCallbacks)
+
                     if cr and cr.static:
                         self.request.sendall(cr.static)
                     else:
@@ -242,16 +279,23 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
             except socket.error as msg:
                 self.server.logger.error('Error: %s', msg.strerror or msg)
 
-            except Exception, e:
+            except Exception as e:
                 self.server.logger.error('Error: %s', e)
 
-class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
+class ThreadedUDPRequestHandler(socketserver.BaseRequestHandler):
 
     def handle(self):
         (data,sock) = self.request
 
         if data:
-            for line in hexdump_table(data):
+            # Collect NBIs
+            hexdump_lines = hexdump_table(data)
+            collect_nbi(self.client_address[1], hexdump_lines,
+                        self.server.config.get('protocol'),
+                        self.server.config.get('usessl'),
+                        self.server.diverterListenerCallbacks)
+
+            for line in hexdump_lines:
                 self.server.logger.info(INDENT + line)
 
         cr = self.server.custom_response
@@ -264,16 +308,16 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
             except socket.error as msg:
                 self.server.logger.error('Error: %s', msg.strerror or msg)
 
-            except Exception, e:
+            except Exception as e:
                 self.server.logger.error('Error: %s', e)
 
-class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     # Avoid [Errno 98] Address already in use due to TIME_WAIT status on TCP
     # sockets, for details see:
     # https://stackoverflow.com/questions/4465959/python-errno-98-address-already-in-use
     allow_reuse_address = True
 
-class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
+class ThreadedUDPServer(socketserver.ThreadingMixIn, socketserver.UDPServer):
     pass
 
 def hexdump_table(data, length=16):
@@ -281,10 +325,22 @@ def hexdump_table(data, length=16):
     hexdump_lines = []
     for i in range(0, len(data), 16):
         chunk = data[i:i+16]
-        hex_line   = ' '.join(["%02X" % ord(b) for b in chunk ] )
-        ascii_line = ''.join([b if ord(b) > 31 and ord(b) < 127 else '.' for b in chunk ] )
+        hex_line   = ' '.join(["%02X" % b for b in chunk ] )
+        ascii_line = ''.join([chr(b) if b > 31 and b < 127 else '.' for b in chunk ] )
         hexdump_lines.append("%04X: %-*s %s" % (i, length*3, hex_line, ascii_line ))
     return hexdump_lines
+
+def collect_nbi(sport, hexdump_lines, proto, is_ssl_encrypted,
+        diverterCallbacks):
+    nbi = {}
+    # Show upto 16 lines of hex dump
+    nbi['Data Hexdump'] = hexdump_lines[:16]
+
+    # Report diverter everytime we capture an NBI
+    # Using an empty string for application_layer_protocol in Raw Listener so
+    # that diverter can override the empty string with the
+    # transport_layer_protocol
+    diverterCallbacks.logNbi(sport, nbi, proto, '', is_ssl_encrypted)
 
 ###############################################################################
 # Testing code
@@ -292,11 +348,11 @@ def test(config):
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-    print "\t[RawListener] Sending request:\n%s" % "HELO\n"
+    print("\t[RawListener] Sending request:\n%s" % "HELO\n")
     try:
         # Connect to server and send data
         sock.connect(('localhost', int(config.get('port', 23))))
-        sock.sendall("HELO\n")
+        sock.sendall(b"HELO\n")
 
         # Receive data from the server and shut down
         received = sock.recv(1024)

@@ -1,3 +1,5 @@
+# Copyright 2025 Google LLC
+
 import os
 import re
 import sys
@@ -6,7 +8,6 @@ import errno
 import ctypes
 import signal
 import socket
-import pyping
 import ftplib
 import poplib
 import shutil
@@ -19,9 +20,12 @@ import platform
 import requests
 import netifaces
 import subprocess
+import ssl
 import irc.client
-import ConfigParser
+import configparser
 from collections import OrderedDict
+from icmplib import ping
+from requests.adapters import HTTPAdapter
 
 logger = logging.getLogger('FakeNetTests')
 logging.basicConfig(format='%(message)s', level=logging.INFO)
@@ -53,7 +57,7 @@ def execute_detached(execute_cmd, winders=False):
                                shell=shl,
                                close_fds = cfds,
                                preexec_fn = preexec).pid
-    except Exception, e:
+    except Exception as e:
         logger.info('Error: Failed to execute command: %s', execute_cmd)
         logger.info('       %s', e)
         return None
@@ -233,7 +237,7 @@ class FakeNetTester(object):
         if self.settings.windows:
             PROCESS_TERMINATE = 1
             p = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE, 0, pid)
-            retval = p != 0;
+            retval = p != 0
             if p:
                 ctypes.windll.kernel32.CloseHandle(p)
         else:
@@ -357,7 +361,7 @@ class FakeNetTester(object):
             # Iterating over tests first, match specifications second to
             # preserve the order of the selected tests. Less efficient to
             # compile every regex several times, but less confusing.
-            for testname, test in tests.items():
+            for testname, test in list(tests.items()):
 
                 # First determine if it is to be excluded, in which case,
                 # remove it and do not evaluate further match specifications.
@@ -431,7 +435,7 @@ class FakeNetTester(object):
             while True:
                 logger.info('Type \'ok\' to continue, or \'exit\' to stop')
                 try:
-                    ok = raw_input()
+                    ok = input()
                 except EOFError:
                     ok = 'exit'
 
@@ -444,8 +448,12 @@ class FakeNetTester(object):
         logger.info('Testing')
         logger.info('-' * 79)
 
+        nPassedTests = 0
+        nFailedTests = 0
+        failedTests = []
+
         # Do each test
-        for desc, (callback, args, expected) in tests.iteritems():
+        for desc, (callback, args, expected) in tests.items():
             logger.debug('Testing: %s' % (desc))
             passed = self._tryTest(desc, callback, args, expected)
 
@@ -454,12 +462,25 @@ class FakeNetTester(object):
                 logger.debug('Retrying: %s' % (desc))
                 passed = self._tryTest(desc, callback, args, expected)
 
+            if passed:
+                nPassedTests += 1
+            else:
+                nFailedTests += 1
+                failedTests.append(desc)
+
             self._printStatus(desc, passed)
 
             time.sleep(0.5)
 
         logger.info('-' * 79)
-        logger.info('Tests complete')
+        logger.info('Done.')
+        logger.info('Passed: %s/%s | Failed: %s/%s' % (nPassedTests, len(tests), nFailedTests, len(tests)))
+
+        if nFailedTests:
+            logger.info('\nFailed tests:')
+            for test in failedTests:
+                logger.info('[*] %s' % (test))
+
         logger.info('-' * 79)
 
         if self.settings.singlehost:
@@ -490,7 +511,7 @@ class FakeNetTester(object):
             s.connect((host, port))
 
             if teststring is None:
-                teststring = 'Testing FakeNet-NG'
+                teststring = b'Testing FakeNet-NG'
 
             if expected is None:
                 # RawListener is an echo server unless otherwise configured
@@ -509,6 +530,8 @@ class FakeNetTester(object):
             recvd = s.recv(4096)
 
             retval = (recvd == expected)
+            if not retval:
+                logger.error('Expected response: %s, Received response: %s' % (expected, recvd))
 
         except socket.error as e:
             logger.error('Socket error: %s (%s %s:%d)' %
@@ -518,9 +541,9 @@ class FakeNetTester(object):
 
         return retval
 
-    def _test_icmp(self, host):
-        r = pyping.ping(host, count=1)
-        return (r.ret_code == 0)
+    def _test_icmp(self, host, id=None):
+        r = ping(host, count=1, id=id)
+        return r.is_alive
 
     def _test_ns(self, hostname, expected):
        return (expected == socket.gethostbyname(hostname))
@@ -547,12 +570,12 @@ class FakeNetTester(object):
         lines = msg[1]
         octets = msg[2]
 
-        if not response.startswith('+OK'):
+        if not response.startswith(b'+OK'):
             msg = 'POP3 response does not start with "+OK"'
             logger.error(msg)
             return False
 
-        if not 'Alice' in ''.join(lines):
+        if not b'Alice' in b''.join(lines):
             msg = 'POP3 message did not contain expected string'
             raise FakeNetTestException(msg)
             return False
@@ -572,9 +595,20 @@ class FakeNetTester(object):
         return irc_tester.test_irc()
 
     def _test_http(self, hostname, port=None, scheme=None, uri=None,
-                   teststring=None):
+                   teststring=None, verify=False):
         """Test HTTP Listener"""
+
+        # https://stackoverflow.com/a/50215614
+        # HACK to force requests to use Windows Certificate store
+        class SSLContextAdapter(HTTPAdapter):
+            def init_poolmanager(self, *args, **kwargs):
+                ctx = ssl.create_default_context()
+                ctx.load_default_certs()
+                kwargs['ssl_context'] = ctx
+                return super(SSLContextAdapter, self).init_poolmanager(*args, **kwargs)
+
         retval = False
+        sess = requests.Session()
 
         scheme = scheme if scheme else 'http'
         uri = uri.lstrip('/') if uri else 'asdf.html'
@@ -585,8 +619,12 @@ class FakeNetTester(object):
         else:
             url = '%s://%s/%s' % (scheme, hostname, uri)
 
+        if (scheme == "https") and verify and sys.platform.startswith('win32'):
+            adapter = SSLContextAdapter()
+            sess.mount(url, adapter)
+
         try:
-            r = requests.get(url, timeout=3)
+            r = sess.get(url, timeout=3, verify=verify)
 
             if r.status_code != 200:
                 raise FakeNetTestException('Status code %d' % (r.status_code))
@@ -599,12 +637,18 @@ class FakeNetTester(object):
         except requests.exceptions.Timeout as e:
             pass
 
+        except requests.exceptions.SSLError as e:
+            pass
+
+        except ValueError as e:
+            pass
+
         except FakeNetTestException as e:
             pass
 
         return retval
 
-    def _test_ftp(self, hostname, port=None):
+    def _test_ftp(self, hostname, port=0):
         """Note that the FakeNet-NG Proxy listener won't know what to do with
         this client if you point it at some random port, because the client
         listens silently for the server 220 welcome message which doesn't give
@@ -698,6 +742,7 @@ class FakeNetTester(object):
         blacklistedhost = self.settings.blacklistedhost
         blacklistedtcp = self.settings.blacklistedtcp
         blacklistedudp = self.settings.blacklistedudp
+        blacklistedicmp = self.settings.blacklistedicmp
         localhost = self.settings.localhost
         dns_expected = self.settings.dns_expected
         hidden_tcp = self.settings.hidden_tcp
@@ -722,11 +767,11 @@ class FakeNetTester(object):
             t['TCP localhost @ bound'] = (self._test_sk, (tcp, localhost, 1337), True)
             t['TCP localhost @ unbound'] = (self._test_sk, (tcp, localhost, 9999), False)
 
-        t['TCP custom test static Base64'] = (self._test_sk, (tcp, ext_ip, 1000, 'whatever', '\x0fL\x0aR\x0e'), True)
-        t['TCP custom test static string'] = (self._test_sk, (tcp, ext_ip, 1001, 'whatever', 'static string TCP response'), True)
-        t['TCP custom test static file'] = (self._test_sk, (tcp, ext_ip, 1002, 'whatever', 'sample TCP raw file response'), True)
-        whatever = 'whatever'  # Ensures matching test/expected for TCP dynamic
-        t['TCP custom test dynamic'] = (self._test_sk, (tcp, ext_ip, 1003, whatever, ''.join([chr(ord(c)+1) for c in whatever])), True)
+        t['TCP custom test static Base64'] = (self._test_sk, (tcp, ext_ip, 1000, b'whatever', b'\x0fL\x0aR\x0e'), True)
+        t['TCP custom test static string'] = (self._test_sk, (tcp, ext_ip, 1001, b'whatever', b'static string TCP response'), True)
+        t['TCP custom test static file'] = (self._test_sk, (tcp, ext_ip, 1002, b'whatever', b'sample TCP raw file response'), True)
+        whatever = b'whatever'  # Ensures matching test/expected for TCP dynamic
+        t['TCP custom test dynamic'] = (self._test_sk, (tcp, ext_ip, 1003, whatever, b''.join([chr(c+1).encode("utf-8") for c in whatever])), True)
 
         t['UDP external IP @ bound'] = (self._test_sk, (udp, ext_ip, 1337), True)
         t['UDP external IP @ unbound'] = (self._test_sk, (udp, ext_ip, 9999), True)
@@ -738,9 +783,9 @@ class FakeNetTester(object):
             t['UDP localhost @ bound'] = (self._test_sk, (udp, localhost, 1337), True)
             t['UDP localhost @ unbound'] = (self._test_sk, (udp, localhost, 9999), False)
 
-        t['UDP custom test static Base64'] = (self._test_sk, (udp, ext_ip, 1000, 'whatever', '\x0fL\x0aR\x0e'), True)
-        whatever = 'whatever2'  # Ensures matching test/expected for UDP dynamic
-        t['UDP custom test dynamic'] = (self._test_sk, (udp, ext_ip, 1003, whatever, ''.join([chr(ord(c)+1) for c in whatever])), True)
+        t['UDP custom test static Base64'] = (self._test_sk, (udp, ext_ip, 1000, b'whatever', b'\x0fL\x0aR\x0e'), True)
+        whatever = b'whatever2'  # Ensures matching test/expected for UDP dynamic
+        t['UDP custom test dynamic'] = (self._test_sk, (udp, ext_ip, 1003, whatever, b''.join([chr(c+1).encode("utf-8") for c in whatever])), True)
 
         t['ICMP external IP'] = (self._test_icmp, (ext_ip,), True)
         t['ICMP arbitrary host'] = (self._test_icmp, (arbitrary,), True)
@@ -748,14 +793,13 @@ class FakeNetTester(object):
 
         t['DNS listener test'] = (self._test_ns, (domain_dne, dns_expected), True)
         t['HTTP listener test'] = (self._test_http, (arbitrary,), True)
-        # Enable HTTPS when we have either added Server Name Indication and Dynamic CA or have modified `_test_http` to
-        # Ignore certificate issues. Here is the error that arises otherwise.
-        #   Starting new HTTPS connection (1): 8.8.8.8
-        #   Test HTTP listener test with SSL: Uncaught exception of type <class 'requests.exceptions.SSLError'>: [Errno 1] _ssl.c:510: error:14090086:SSL routines:SSL3_GET_SERVER_CERTIFICATE:certificate verify failed
-        #   Starting new HTTPS connection (1): 8.8.8.8
-        #   Test HTTP listener test with SSL: Uncaught exception of type <class 'requests.exceptions.SSLError'>: [Errno 1] _ssl.c:510: error:14090086:SSL routines:SSL3_GET_SERVER_CERTIFICATE:certificate verify failed
-        #   [!!!] FAILED: HTTP listener test with SSL
-        # t['HTTP listener test with SSL'] = (self._test_http, (arbitrary, None, 'https'), True)
+        t['HTTPS listener IP test, no verify'] = (self._test_http, (arbitrary, None, 'https', None, None, False), True)
+        t['HTTPS listener IP test'] = (self._test_http, (arbitrary, None, 'https', None, None, True), False)
+
+        # Server Name Indication implementation works best on Windows platform
+        # See https://github.com/mandiant/flare-fakenet-ng/pull/98#issuecomment-552222568
+        if self.settings.windows:
+            t['HTTPS listener hostname test'] = (self._test_http, ('evil.com', None, 'https', 'test.html', None, True), True)
         t['HTTP custom test by URI'] = (self._test_http, (arbitrary, None, None, '/test.txt', 'Wraps this'), True)
         t['HTTP custom test by hostname'] = (self._test_http, ('some.random.c2.com', None, None, None, 'success'), True)
         t['HTTP custom test by both URI and hostname'] = (self._test_http, ('both_host.com', None, None, '/and_uri.txt', 'Ahoy'), True)
@@ -779,6 +823,8 @@ class FakeNetTester(object):
         t['TCP blacklisted host @ unbound'] = (self._test_sk, (tcp, blacklistedhost, 9999), False)
         t['TCP arbitrary @ blacklisted unbound'] = (self._test_sk, (tcp, arbitrary, blacklistedtcp), False)
         t['UDP arbitrary @ blacklisted unbound'] = (self._test_sk, (udp, arbitrary, blacklistedudp), False)
+        if self.settings.windows:
+            t['ICMP arbitrary @ blacklisted'] = (self._test_icmp, (arbitrary, blacklistedicmp), False)
 
         if self.settings.singlehost:
             t['Listener process blacklist'] = (self._test_http, (arbitrary, self.settings.listener_proc_black), False)
@@ -804,7 +850,7 @@ class FakeNetConfig:
     """Convenience class to read/modify/rewrite a configuration template."""
 
     def __init__(self, path, singlehostmode=True, proxied=True, redirectall=True):
-        self.rawconfig = ConfigParser.RawConfigParser()
+        self.rawconfig = configparser.RawConfigParser()
         self.rawconfig.read(path)
 
         if singlehostmode:
@@ -864,8 +910,8 @@ class FakeNetTestSettings:
         self.configpath = self.genPath('%TEMP%\\fakenet.ini', '/tmp/fakenet.ini')
         self.stopflag = self.genPath('%TEMP%\\stop_fakenet', '/tmp/stop_fakenet')
         self.logpath = self.genPath('%TEMP%\\fakenet.log', '/tmp/fakenet.log')
-        self.fakenet = self.genPath('fakenet', 'python fakenet.py')
-        self.fndir = self.genPath('.', '$HOME/files/src/flare-fakenet-ng/fakenet')
+        self.fakenet = self.genPath('fakenet', 'python3 -m fakenet.fakenet')
+        self.fndir = self.genPath('.', os.path.dirname(os.getcwd()))
 
         # For process blacklisting
         self.pythonname = os.path.basename(sys.executable)
@@ -876,6 +922,7 @@ class FakeNetTestSettings:
         self.blacklistedhost = '6.6.6.6'
         self.blacklistedtcp = 139
         self.blacklistedudp = 67
+        self.blacklistedicmp = 1234
         self.hidden_tcp =  12345
         self.no_service = 10
         self.listener_proc_black = 8080 # HTTP listener with process blacklist
@@ -884,7 +931,7 @@ class FakeNetTestSettings:
         self.listener_host_white = 8083 # HTTP listener with host whitelists
         self.localhost = '127.0.0.1'
         self.dns_expected = '192.0.2.123'
-        self.domain_dne = 'does-not-exist-amirite.fireeye.com'
+        self.domain_dne = 'does-not-exist-amirite.mandiant.com'
         self.sender = 'from-fakenet@example.org'
         self.recipient = 'to-fakenet@example.org'
         self.smtpmsg = 'FakeNet-NG SMTP test email'
@@ -904,7 +951,7 @@ class FakeNetTestSettings:
                 (self.fakenet, self.stopflag, self.logpath, self.configpath))
 
 def is_ip(s):
-    pat = '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
+    pat = r'^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
     return bool(re.match(pat, s))
 
 def main():

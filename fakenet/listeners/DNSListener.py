@@ -1,8 +1,10 @@
+# Copyright 2025 Google LLC
+
 import logging
 
 import threading
 import netifaces
-import SocketServer
+import socketserver
 from dnslib import *
 
 import ssl
@@ -17,7 +19,7 @@ class DNSListener(object):
 
     def taste(self, data, dport):
 
-        confidence = 1 if dport is 53 else 0
+        confidence = 1 if dport == 53 else 0
 
         try:
             d = DNSRecord.parse(data)
@@ -45,8 +47,10 @@ class DNSListener(object):
         self.logger.debug('Starting...')
 
         self.logger.debug('Initialized with config:')
-        for key, value in config.iteritems():
+        for key, value in config.items():
             self.logger.debug('  %10s: %s', key, value)
+        if self.logger.level == logging.INFO:
+            self.logger.info('Hiding logs from blacklisted processes')
 
     def start(self):
 
@@ -72,22 +76,45 @@ class DNSListener(object):
         # Stop listener
         if self.server:
             self.server.shutdown()
-            self.server.server_close()  
+            self.server.server_close()
+
+    def acceptDiverterListenerCallbacks(self, diverterListenerCallbacks):
+        self.server.diverterListenerCallbacks = diverterListenerCallbacks
 
 
 class DNSHandler():
+    def log_message(self, log_level, is_process_blacklisted, message, *args):
+        """The primary objective of this method is to control the log messages
+        generated for requests from blacklisted processes.
+
+        In a case where the DNS server is same as the local machine, the DNS
+        requests from a blacklisted process will reach the DNS listener (which
+        listens on port 53 locally) nevertheless. As a user may not wish to see
+        logs from a blacklisted process, messages are logged with level DEBUG.
+        Executing FakeNet in the verbose mode will print these logs.
+        """
+        if is_process_blacklisted:
+            self.server.logger.log(logging.DEBUG, message, *args)
+        else:
+            self.server.logger.log(log_level, message, *args)
            
-    def parse(self,data):
+    def parse(self, data):
         response = ""
-    
+        proto = 'TCP' if self.server.socket_type == socket.SOCK_STREAM else 'UDP'
+        is_process_blacklisted, process_name, pid = self.server \
+                                                         .diverterListenerCallbacks \
+                                                         .isProcessBlackListed(
+                                                              proto,
+                                                              sport=self.client_address[1])
+
         try:
             # Parse data as DNS        
             d = DNSRecord.parse(data)
 
-        except Exception, e:
-            self.server.logger.error('Error: Invalid DNS Request')
+        except Exception as e:
+            self.log_message(logging.ERROR, is_process_blacklisted, 'Error: Invalid DNS Request')
             for line in hexdump_table(data):
-                self.server.logger.warning(INDENT + line)
+                self.log_message(logging.WARNING, is_process_blacklisted, INDENT + line)
 
         else:                 
             # Only Process DNS Queries
@@ -102,8 +129,17 @@ class DNSHandler():
                 if qname[-1] == '.': qname = qname[:-1]
 
                 qtype = QTYPE[d.q.qtype]
+                self.qname = qname
+                self.qtype = qtype
 
-                self.server.logger.info('Received %s request for domain \'%s\'.', qtype, qname)
+                if process_name is None or pid is None:
+                    self.log_message(logging.INFO, is_process_blacklisted,
+                                      'Received %s request for domain \'%s\'.',
+                                      qtype, qname)
+                else:
+                    self.log_message(logging.INFO, is_process_blacklisted,
+                                     'Received %s request for domain \'%s\' from %s (%s)',
+                                     qtype, qname, process_name, pid)
 
                 # Create a custom response to the query
                 response = DNSRecord(DNSHeader(id=d.header.id, bitmap=d.header.bitmap, qr=1, aa=1, ra=1), q=d.q)
@@ -158,11 +194,11 @@ class DNSHandler():
                         fake_record = socket.gethostbyname(socket.gethostname())
 
                     if self.server.nxdomains > 0:
-                        self.server.logger.info('Ignoring query. NXDomains: %d',
+                        self.log_message(logging.INFO, is_process_blacklisted, 'Ignoring query. NXDomains: %d',
                                 self.server.nxdomains)
                         self.server.nxdomains -= 1
                     else:
-                        self.server.logger.debug('Responding with \'%s\'',
+                        self.log_message(logging.DEBUG, is_process_blacklisted, 'Responding with \'%s\'',
                                                  fake_record)
                         response.add_answer(RR(qname, getattr(QTYPE,qtype), rdata=RDMAP[qtype](fake_record)))
 
@@ -173,7 +209,7 @@ class DNSHandler():
                     # dnslib doesn't like trailing dots
                     if fake_record[-1] == ".": fake_record = fake_record[:-1]
 
-                    self.server.logger.debug('Responding with \'%s\'',
+                    self.log_message(logging.DEBUG, is_process_blacklisted, 'Responding with \'%s\'',
                                              fake_record)
                     response.add_answer(RR(qname, getattr(QTYPE,qtype), rdata=RDMAP[qtype](fake_record)))
 
@@ -182,7 +218,7 @@ class DNSHandler():
 
                     fake_record = self.server.config.get('responsetxt', 'FAKENET')
 
-                    self.server.logger.debug('Responding with \'%s\'', 
+                    self.log_message(logging.DEBUG, is_process_blacklisted, 'Responding with \'%s\'',
                                              fake_record)
                     response.add_answer(RR(qname, getattr(QTYPE,qtype), rdata=RDMAP[qtype](fake_record)))
 
@@ -190,7 +226,7 @@ class DNSHandler():
                 
         return response  
 
-class UDPHandler(DNSHandler, SocketServer.BaseRequestHandler):
+class UDPHandler(DNSHandler, socketserver.BaseRequestHandler):
 
     def handle(self):
 
@@ -198,16 +234,24 @@ class UDPHandler(DNSHandler, SocketServer.BaseRequestHandler):
             (data,sk) = self.request
             response = self.parse(data)
 
+            # Collect NBI
+            nbi = {
+                'Query Type': self.qtype,
+                'Domain': self.qname
+                }
+            collect_nbi(self.client_address[1], nbi, 'UDP', 'No',
+                        self.server.diverterListenerCallbacks)
+
             if response:
                 sk.sendto(response, self.client_address)
 
         except socket.error as msg:
             self.server.logger.error('Error: %s', msg.strerror or msg)
 
-        except Exception, e:
+        except Exception as e:
             self.server.logger.error('Error: %s', e)
 
-class TCPHandler(DNSHandler, SocketServer.BaseRequestHandler):
+class TCPHandler(DNSHandler, socketserver.BaseRequestHandler):
 
     def handle(self):
 
@@ -221,6 +265,15 @@ class TCPHandler(DNSHandler, SocketServer.BaseRequestHandler):
             # TCP DNS protocol
             data = data[2:]
             response = self.parse(data)
+
+            # Collect NBI
+            nbi = {
+                'Query Type': self.qtype,
+                'Domain': self.qname
+                }
+            collect_nbi(self.client_address[1], nbi, 'TCP',
+                        self.server.config.get('usessl'),
+                        self.server.diverterListenerCallbacks)
             
             if response:
                 # Calculate and add the additional "length" parameter
@@ -234,18 +287,18 @@ class TCPHandler(DNSHandler, SocketServer.BaseRequestHandler):
         except socket.error as msg:
             self.server.logger.error('Error: %s', msg.strerror)
 
-        except Exception, e:
+        except Exception as e:
             self.server.logger.error('Error: %s', e)
 
-class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
+class ThreadedUDPServer(socketserver.ThreadingMixIn, socketserver.UDPServer):
 
     # Override SocketServer.UDPServer to add extra parameters
     def __init__(self, server_address, config, logger, RequestHandlerClass):
         self.config = config
         self.logger = logger
-        SocketServer.UDPServer.__init__(self, server_address, RequestHandlerClass)
+        socketserver.UDPServer.__init__(self, server_address, RequestHandlerClass)
 
-class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     
     # Override default value
     allow_reuse_address = True
@@ -254,7 +307,7 @@ class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
     def __init__(self, server_address, config, logger, RequestHandlerClass):
         self.config = config
         self.logger = logger
-        SocketServer.TCPServer.__init__(self,server_address,RequestHandlerClass)
+        socketserver.TCPServer.__init__(self,server_address,RequestHandlerClass)
 
 def hexdump_table(data, length=16):
 
@@ -266,35 +319,40 @@ def hexdump_table(data, length=16):
         hexdump_lines.append("%04X: %-*s %s" % (i, length*3, hex_line, ascii_line ))
     return hexdump_lines
 
+def collect_nbi(sport, nbi, proto, is_ssl_encrypted, diverterListenerCallbacks):
+    # Report diverter everytime we capture an NBI
+    diverterListenerCallbacks.logNbi(sport, nbi, proto, 'DNS', is_ssl_encrypted)
+
+
 ###############################################################################
 # Testing code
 def test(config):
 
-    print "\t[DNSListener] Testing 'google.com' A record."
+    print("\t[DNSListener] Testing 'google.com' A record.")
     query = DNSRecord(q=DNSQuestion('google.com',getattr(QTYPE,'A')))
     answer_pkt = query.send('localhost', int(config.get('port', 53)))
     answer = DNSRecord.parse(answer_pkt)
 
-    print '-'*80
-    print answer
-    print '-'*80
+    print('-'*80)
+    print(answer)
+    print('-'*80)
 
-    print "\t[DNSListener] Testing 'google.com' MX record."
+    print("\t[DNSListener] Testing 'google.com' MX record.")
     query = DNSRecord(q=DNSQuestion('google.com',getattr(QTYPE,'MX')))
     answer_pkt = query.send('localhost', int(config.get('port', 53)))
     answer = DNSRecord.parse(answer_pkt)
 
-    print '-'*80
-    print answer
+    print('-'*80)
+    print(answer)
 
-    print "\t[DNSListener] Testing 'google.com' TXT record."
+    print("\t[DNSListener] Testing 'google.com' TXT record.")
     query = DNSRecord(q=DNSQuestion('google.com',getattr(QTYPE,'TXT')))
     answer_pkt = query.send('localhost', int(config.get('port', 53)))
     answer = DNSRecord.parse(answer_pkt)
 
-    print '-'*80
-    print answer
-    print '-'*80
+    print('-'*80)
+    print(answer)
+    print('-'*80)
 
 def main():
     logging.basicConfig(format='%(asctime)s [%(name)15s] %(message)s', datefmt='%m/%d/%y %I:%M:%S %p', level=logging.DEBUG)

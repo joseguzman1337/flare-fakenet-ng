@@ -1,3 +1,5 @@
+# Copyright 2025 Google LLC
+
 class Config(object):
     """Configuration primitives.
 
@@ -11,7 +13,7 @@ class Config(object):
         if config_dict is not None:
             self.configure(config_dict, portlists)
 
-    def configure(self, config_dict, portlists=[], stringlists=[]):
+    def configure(self, config_dict, portlists=[], stringlists=[], idlists=[]):
         """Parse configuration.
 
         Does three things:
@@ -19,7 +21,7 @@ class Config(object):
             2.) Turn string lists into arrays for quicker access
             3.) Expand port range specifications
         """
-        self._dict = dict((k.lower(), v) for k, v in config_dict.iteritems())
+        self._dict = dict((k.lower(), v) for k, v in config_dict.items())
 
         for entry in portlists:
             portlist = self.getconfigval(entry)
@@ -31,6 +33,12 @@ class Config(object):
             stringlist = self.getconfigval(entry)
             if stringlist:
                 expanded = [s.strip() for s in stringlist.split(',')]
+                self.setconfigval(entry, expanded)
+
+        for entry in idlists:
+            idlist = self.getconfigval(entry)
+            if idlist:
+                expanded = [int(c) for c in idlist.split(',')]
                 self.setconfigval(entry, expanded)
 
     def reconfigure(self, portlists=[], stringlists=[]):
@@ -51,8 +59,8 @@ class Config(object):
             if '-' not in i:
                 ports.append(int(i))
             else:
-                l, h = map(int, i.split('-'))
-                ports += range(l, h + 1)
+                l, h = list(map(int, i.split('-')))
+                ports += list(range(l, h + 1))
         return ports
 
     def _fuzzy_true(self, value):
@@ -62,7 +70,7 @@ class Config(object):
         return value.lower() in ['no', 'off', 'false', 'disable', 'disabled']
 
     def is_configured(self, opt):
-        return opt.lower() in self._dict.keys()
+        return opt.lower() in list(self._dict.keys())
 
     def is_unconfigured(self, opt):
         return not self.is_configured(opt)

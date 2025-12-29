@@ -1,7 +1,9 @@
+# Copyright 2025 Google LLC
+
 import dpkt
 import socket
 import logging
-import debuglevels
+from . import debuglevels
 
 
 class PacketCtx(object):
@@ -64,7 +66,7 @@ class PacketCtx(object):
         self.dkey = None
 
         # Parse as much as possible
-        self.ipver = ((ord(self._raw[0]) & 0xf0) >> 4)
+        self.ipver = ((self._raw[0] & 0xf0) >> 4)
         if self.ipver == 4:
             self._parseIpv4()
         elif self.ipver == 6:
@@ -204,6 +206,13 @@ class PacketCtx(object):
     def icmp_code(self):
         if self._is_icmp:
             return self._hdr.data.code
+        return None
+
+    @property
+    def icmp_id(self):
+        if self._is_icmp and self._hdr.data.type in \
+            [dpkt.icmp.ICMP_ECHO, dpkt.icmp.ICMP_ECHOREPLY]:
+            return self._hdr.icmp.data.id
         return None
 
     def fmtL3Csums(self):

@@ -1,3 +1,5 @@
+# Copyright 2025 Google LLC
+
 import os
 import re
 import glob
@@ -8,7 +10,7 @@ import binascii
 import threading
 import subprocess
 import netfilterqueue
-from debuglevels import *
+from .debuglevels import *
 from collections import defaultdict
 from . import diverterbase
 
@@ -143,10 +145,10 @@ class LinuxDiverterNfqueue(object):
             self._bound = True
         except OSError as e:
             self.logger.error('Failed to start queue for %s: %s' %
-                              (str(self), e.message))
+                              (str(self), str(e)))
         except RuntimeWarning as e:
             self.logger.error('Failed to start queue for %s: %s' %
-                              (str(self), e.message))
+                              (str(self), str(e)))
 
         if not self._bound:
             return False
@@ -164,7 +166,7 @@ class LinuxDiverterNfqueue(object):
             self._thread.start()
             self._started = True
         except RuntimeError as e:
-            self.logger.error('Failed to start queue thread: %s' % (e.message))
+            self.logger.error('Failed to start queue thread: %s' % (str(e)))
 
         return self._started
 
@@ -249,7 +251,7 @@ class ProcfsReader(object):
                             retval = cb_retval
                             break
         except IOError as e:
-            self.logger.error('Failed accessing %s: %s' % (path, e.message))
+            self.logger.error('Failed accessing %s: %s' % (path, str(e)))
             # All or nothing
             retval = [] if multi else None
 
@@ -263,7 +265,7 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
 
     def init_linux_mixin(self):
         self.old_dns = None
-        self.iptables_captured = ''
+        self.iptables_captured = b''
 
     def getNewDestinationIp(self, ip):
         """On Linux, FTP tests fail if IP redirection uses the external IP, so
@@ -294,24 +296,24 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
         return False
 
     def linux_capture_iptables(self):
-        self.iptables_captured = ''
+        self.iptables_captured = b''
         ret = None
 
         try:
             p = subprocess.Popen(['iptables-save'], stdout=subprocess.PIPE)
             while True:
                 buf = p.stdout.read()
-                if buf == '':
+                if buf == b'':
                     break
                 self.iptables_captured += buf
 
-            if self.iptables_captured == '':
+            if self.iptables_captured == b'':
                 self.logger.warning('Null iptables-save output, likely not ' +
                                     'privileged')
             ret = p.wait()
         except OSError as e:
             self.logger.error('Error executing iptables-save: %s' %
-                              (e.message))
+                              (str(e)))
 
         return ret
 
@@ -326,7 +328,7 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
             ret = p.wait()
         except OSError as e:
             self.logger.error('Error executing iptables-restore: %s' %
-                              (e.message))
+                              (str(e)))
 
         return ret
 
@@ -349,7 +351,7 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
                     self.logger.error('Received return code %d from %s' +
                                       (ret, cmd))
         except OSError as e:
-            self.logger.error('Error executing %s: %s' % (cmd, e.message))
+            self.logger.error('Error executing %s: %s' % (cmd, str(e)))
 
         return rets
 
@@ -386,7 +388,7 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
             self.logger.debug(('Failed to open %s to enumerate netfilter '
                                'netlink queues, caller may proceed as if '
                                'none are in use: %s') %
-                              (procfs_path, e.message))
+                              (procfs_path, str(e)))
 
         return qnos
 
@@ -397,7 +399,7 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
         existing_queues = self.linux_get_current_nfnlq_bindings()
 
         next_qnos = list()
-        for qno in xrange(QNO_MAX + 1):
+        for qno in range(QNO_MAX + 1):
             if qno not in existing_queues:
                 next_qnos.append(qno)
                 if len(next_qnos) == n:
@@ -443,7 +445,7 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
                         ifaces.append(fields[0].strip())
         except IOError as e:
             self.logger.error('Failed to open %s to enumerate interfaces: %s' %
-                              (procfs_path, e.message))
+                              (procfs_path, str(e)))
 
         return ifaces
 
@@ -470,7 +472,7 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
         except IOError as e:
             self.logger.error(('Failed to open %s to save DNS ' +
                               'configuration: %s') % (resolvconf_path,
-                              e.message))
+                              str(e)))
 
         if self.old_dns:
             try:
@@ -482,7 +484,7 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
             except IOError as e:
                 self.logger.error(('Failed to open %s to modify DNS ' +
                                   'configuration: %s') % (resolvconf_path,
-                                  e.message))
+                                  str(e)))
 
     def linux_restore_local_dns(self):
         resolvconf_path = '/etc/resolv.conf'
@@ -494,7 +496,7 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
             except IOError as e:
                 self.logger.error(('Failed to open %s to restore DNS ' +
                                   'configuration: %s') % (resolvconf_path,
-                                  e.message))
+                                  str(e)))
 
     def linux_find_processes(self, names):
         """But what if a blacklisted process spawns after we call
@@ -616,7 +618,7 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
                                         (line.strip()))
         except IOError as e:
             self.logger.error('No such protocol/IP ver (%s) or error: %s' %
-                              (procfs_path, e.message))
+                              (procfs_path, str(e)))
 
         return inode
 
@@ -699,7 +701,7 @@ class LinUtilMixin(diverterbase.DiverterPerOSDelegate):
                 comm = f.read().strip()
         except IOError as e:
             self.pdebug(DPROCFS, 'Failed to open %s: %s' %
-                        (procfs_path, e.message))
+                        (procfs_path, str(e)))
         return comm
 
     def linux_get_pid_comm_by_endpoint(self, ipver, proto_name, ip, port):
